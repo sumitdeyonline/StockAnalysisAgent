@@ -58,11 +58,12 @@ You will now be returned to the main configuration page. Set the parameters as f
 - **Authentication**: Select **"Allow unauthenticated invocations"** (This makes your Streamlit app publicly accessible on the web framework).
 
 ### 5. Environment Variables & Secrets
-Because this agent relies heavily on external APIs, you must pass your hidden variables safely!
-1. Scroll down and expand the **Container, Volumes, Networking, Security** section.
-2. Under the **Container** tab, locate **Container port**. Change this from `8080` to **`8501`** (This is Streamlit's required port default).
-3. Scroll down slightly to **Environment Variables**.
-4. Click **+ ADD VARIABLE** and copy/paste exactly what is within your local `.env` file:
+Because this agent relies heavily on external APIs, you must pass your hidden variables safely! Google hides this section by default.
+1. Scroll down the main "Create service" page until you find an expandable dropdown usually labeled **"Container(s), Volumes, Networking, Security"** (or an "Advanced" setting dropdown). Click it to expand the panel.
+2. Ensure you are on the **"Container"** tab inside this newly expanded section.
+3. Locate **Container port**. Change this from `8080` to **`8501`** (This is Streamlit's required port default).
+4. Within this same Container section, look for a tab or sub-header labeled **"Variables & Secrets"** (or simply "Environment Variables").
+5. Click **+ ADD VARIABLE** and copy/paste exactly what is within your local `.env` file:
    - Name: `ANTHROPIC_API_KEY` | Value: `your-actual-api-key`
    - Name: `TAVILY_API_KEY`     | Value: `your-actual-api-key`
    - Name: `DATABASE_URL`       | Value: `your-postgres-uri`
