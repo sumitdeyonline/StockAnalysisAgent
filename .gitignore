@@ -5,7 +5,10 @@ __pycache__/
 
 # C extensions
 *.so
-
+.env
+.env.example
+chroma_db/
+.venv/
 # Distribution / packaging
 .Python
 build/

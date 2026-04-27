@@ -1,0 +1,249 @@
+import streamlit as st
+import os
+from dotenv import load_dotenv
+from agent import setup_agent, is_financial_query
+from langchain_core.messages import HumanMessage, AIMessage
+from tools.db_tools import init_db, save_search_query, get_recent_searches, delete_search_history, delete_single_search, update_search_response
+
+# Load environment variables from .env
+load_dotenv()
+
+# Initialize PostgreSQL Database Table if it doesn't exist
+init_db()
+
+#st.set_page_config(page_title="Claude Stock Agent", page_icon="📈", layout="wide")
+st.set_page_config(page_title="Stock Agent", page_icon="📈", layout="wide")
+
+st.markdown("""
+<style>
+/* Compact UI for Sidebar Search History */
+[data-testid="stSidebar"] div[data-testid="stButton"] button {
+    padding: 0.1rem 0.5rem !important;
+    min-height: 1.5rem !important;
+    height: auto !important;
+}
+[data-testid="stSidebar"] div[data-testid="stButton"] button p {
+    font-size: 0.75rem !important;
+    line-height: 1.2 !important;
+}
+[data-testid="stSidebar"] div[data-testid="column"] {
+    padding: 0 !important;
+    gap: 0 !important;
+}
+</style>
+""", unsafe_allow_html=True)
+st.title("📈 Stock Analysis Agent")
+#st.markdown("This agent has access to real-time market data (yfinance), recent news (Tavily), a Postgres database for memory, and a ChromaDB vector store for semantic context.")
+st.markdown("This agent has access to real-time market data , recent news, and semantic context.")
+
+if "email" not in st.session_state:
+    st.session_state.email = None
+
+if not st.session_state.email:
+    st.markdown("### Please sign in")
+    email_input = st.text_input("Enter your email ID to load your history:")
+    if st.button("Continue"):
+        if email_input:
+            st.session_state.email = email_input
+            st.rerun()
+        else:
+            st.warning("Please enter a valid email.")
+    st.stop()
+    
+st.markdown(f"**Logged in as:** `{st.session_state.email}`")
+
+# Initialize session state for messages and the agent
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "agent" not in st.session_state:
+    st.session_state.agent = setup_agent()
+
+def show_comparison_dialog():
+    with st.container(border=True):
+        st.markdown("### 🔍 Historical Analysis Review")
+        data = st.session_state.confirming_comparison
+    st.markdown(f"**Past Query:** `{data['query']}`")
+    st.info(data['response'])
+    
+    st.markdown("What would you like to do with this historical analysis?")
+    col1, col2, col3 = st.columns(3)
+    if col1.button("Update Live Analysis", type="primary", help="Query the AI directly to check for updates."):
+        st.session_state.pending_comparison = data
+        del st.session_state["confirming_comparison"]
+        st.rerun()
+    if col2.button("Load to Chat", help="Load this past result into the main chat screen."):
+        st.session_state.messages = [
+            HumanMessage(content=data['query']),
+            AIMessage(content=data['response'])
+        ]
+        del st.session_state["confirming_comparison"]
+        st.rerun()
+    if col3.button("Cancel"):
+        del st.session_state["confirming_comparison"]
+        st.rerun()
+
+if "confirming_comparison" in st.session_state:
+    show_comparison_dialog()
+
+# Display chat messages from history
+for msg in st.session_state.messages:
+    # Filter out langgraph's intermediate tool messages from the UI simple history
+    if isinstance(msg, HumanMessage):
+        with st.chat_message("user"):
+            st.markdown(msg.content)
+    elif isinstance(msg, AIMessage):
+        with st.chat_message("assistant"):
+            st.markdown(msg.content)
+
+prompt_to_run = None
+active_search_id = None
+
+active_query = None
+
+# Accept user input
+if prompt := st.chat_input("Enter your request (e.g., 'Analyze NVDA stock and recent news'):"):
+    prompt_to_run = prompt
+
+# Check for pending comparisons triggered by the sidebar
+if "pending_comparison" in st.session_state and st.session_state.pending_comparison:
+    prompt_to_run = st.session_state.pending_comparison["prompt"]
+    active_search_id = st.session_state.pending_comparison["search_id"]
+    active_query = st.session_state.pending_comparison["query"]
+    st.session_state.pending_comparison = None
+
+@st.fragment
+def execute_agent_search(user_message, prompt_str, search_id):
+    # Run the agent
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking and interacting with tools..."):
+            try:
+                # The agent graph requires a messages list input
+                result = st.session_state.agent.invoke(
+                    {"messages": [user_message]}
+                )
+                
+                # The final message from the agent is the last one in the list
+                final_ai_msg = result['messages'][-1]
+                st.markdown(final_ai_msg.content)
+                
+                # Consolidate the new running update into the existing item, OR create a new search history log
+                if search_id:
+                    update_search_response(st.session_state.email, search_id, final_ai_msg.content)
+                else:
+                    save_search_query(st.session_state.email, prompt_str, final_ai_msg.content)
+                
+                # Append to session state
+                st.session_state.messages.append(final_ai_msg)
+            except Exception as e:
+                st.error(f"An error occurred: {e}")
+
+if prompt_to_run:
+    actual_input_msg = HumanMessage(content=prompt_to_run)
+    
+    if active_search_id:
+        display_text = f"🔄 *Re-evaluating historical query against live systems:* **{active_query}**"
+        st.session_state.messages.append(HumanMessage(content=display_text))
+        with st.chat_message("user"):
+            st.markdown(display_text)
+        execute_agent_search(actual_input_msg, prompt_to_run, active_search_id)
+    else:
+        # Enforce Guardrail on natively typed queries
+        with st.spinner("Validating request..."):
+            is_valid = is_financial_query(prompt_to_run)
+            
+        st.session_state.messages.append(actual_input_msg)
+        with st.chat_message("user"):
+            st.markdown(prompt_to_run)
+            
+        if not is_valid:
+            warning_msg = "⚠️ **Guardrail Alert:** I am a specialized financial assistant. Your query does not appear to relate to stocks, markets, companies, or investing. Please adjust your request."
+            st.session_state.messages.append(AIMessage(content=warning_msg))
+            with st.chat_message("assistant"):
+                st.warning(warning_msg)
+        else:
+            execute_agent_search(actual_input_msg, prompt_to_run, active_search_id)
+
+st.sidebar.markdown("### Chat Controls")
+if st.sidebar.button("➕ New Chat", use_container_width=True, help="Clear the current chat window"):
+    st.session_state.messages = []
+    st.rerun()
+
+#st.sidebar.markdown("---")
+st.sidebar.markdown("### Search History")
+past_searches = get_recent_searches(st.session_state.email)
+if past_searches:
+    for search in past_searches:
+        search_id = search["id"]
+        query = search["query"]
+        snippet = query[:30] + "..." if len(query) > 30 else query
+        
+        col1, col2 = st.sidebar.columns([5, 1])
+        if col1.button(snippet, key=f"load_{search_id}", help="Review and compare against live data"):
+            st.session_state.messages = []
+            compare_prompt = (
+                f"I previously asked you: '{query}'\n\n"
+                f"Your previous analysis was:\n<past_analysis>\n{search.get('response') or 'No past response recorded.'}\n</past_analysis>\n\n"
+                f"Please explicitly perform this task again using real-time data, and provide a detailed comparison highlighting exactly what has changed (prices, news, developments) since that past analysis was generated."
+            )
+            st.session_state.confirming_comparison = {
+                "prompt": compare_prompt, 
+                "search_id": search_id,
+                "query": query,
+                "response": search.get('response') or 'No past response recorded.'
+            }
+            st.rerun()
+            
+        if col2.button("✖", key=f"del_{search_id}", help="Delete this search"):
+            delete_single_search(st.session_state.email, search_id)
+            st.rerun()
+            
+    #st.sidebar.markdown("---")
+    if st.sidebar.button("Clear All History", type="primary"):
+        delete_search_history(st.session_state.email)
+        st.rerun()
+else:
+    st.sidebar.info("No searches yet.")
+
+@st.cache_data(ttl=300)
+def load_market_movers():
+    from tools.finance import get_market_movers
+    return get_market_movers()
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("### Market Movers")
+movers = load_market_movers()
+if "error" not in movers:
+    tab1, tab2, tab3 = st.sidebar.tabs(["📈 Gainers", "📉 Losers", "🔥 Active"])
+    
+    def render_mover_list(container, items):
+        if not items:
+            container.info("Data unavailable")
+            return
+        for item in items:
+            sym = item['symbol']
+            price = f"${item['price']:.2f}" if item['price'] else "N/A"
+            chg = item['change']
+            color = "green" if chg and chg > 0 else "red"
+            chg_str = f"{chg:.2f}%" if chg else "N/A"
+            container.markdown(f"**{sym}**: {price} (:{color}[{chg_str}])")
+            
+    render_mover_list(tab1, movers.get("gainers", []))
+    render_mover_list(tab2, movers.get("losers", []))
+    render_mover_list(tab3, movers.get("actives", []))
+else:
+    st.sidebar.warning("Failed to load generic market movers.")
+
+# st.sidebar.markdown("---")
+# st.sidebar.markdown("### Status")
+# st.sidebar.success("Database tools initialized")
+# st.sidebar.success("ChromaDB vector store connected")
+# if os.environ.get("TAVILY_API_KEY"):
+#     st.sidebar.success("Tavily API initialized")
+# else:
+#     st.sidebar.warning("Tavily API Key missing")
+    
+# if os.environ.get("ANTHROPIC_API_KEY"):
+#     st.sidebar.success("Claude 3.5 Sonnet connected")
+# else:
+#     st.sidebar.warning("Anthropic API Key missing")
