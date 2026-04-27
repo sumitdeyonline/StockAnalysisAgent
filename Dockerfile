@@ -20,6 +20,9 @@ RUN uv pip install --system --no-cache-dir -r requirements.txt
 # Copy the entire project context into the container
 COPY . .
 
+# Bypass Protobuf >4.xx descriptor errors caused by dependency conflicts directly in the Alpine/Slim runtime
+ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+
 # Expose Streamlit's default port natively required by Google Cloud Run
 EXPOSE 8501
 
