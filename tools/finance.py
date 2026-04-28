@@ -52,18 +52,19 @@ def get_company_news(ticker: str) -> str:
 def get_market_movers() -> dict:
     """Fetch Top Gainers, Losers, and Most Actives from yfinance."""
     try:
-        gainers = yf.screener.screen(yf.screener.PREDEFINED_SCREENER_QUERIES['day_gainers']['query'])
-        losers = yf.screener.screen(yf.screener.PREDEFINED_SCREENER_QUERIES['day_losers']['query'])
-        actives = yf.screener.screen(yf.screener.PREDEFINED_SCREENER_QUERIES['most_actives']['query'])
+        gainers_resp = yf.screener.screen(yf.screener.PREDEFINED_SCREENER_QUERIES['day_gainers']['query'])
+        losers_resp = yf.screener.screen(yf.screener.PREDEFINED_SCREENER_QUERIES['day_losers']['query'])
+        actives_resp = yf.screener.screen(yf.screener.PREDEFINED_SCREENER_QUERIES['most_actives']['query'])
         
-        def parse(resp):
+        def parse(resp, sort_key, reverse):
             if not resp or 'quotes' not in resp: return []
-            return [{"symbol": q.get("symbol"), "price": q.get("regularMarketPrice"), "change": q.get("regularMarketChangePercent")} for q in resp['quotes'][:5]]
+            quotes = sorted(resp['quotes'], key=lambda x: x.get(sort_key, 0), reverse=reverse)
+            return [{"symbol": q.get("symbol"), "price": q.get("regularMarketPrice"), "change": q.get("regularMarketChangePercent"), "volume": q.get("regularMarketVolume")} for q in quotes[:5]]
             
         return {
-            "gainers": parse(gainers),
-            "losers": parse(losers),
-            "actives": parse(actives)
+            "gainers": parse(gainers_resp, 'regularMarketChangePercent', True),
+            "losers": parse(losers_resp, 'regularMarketChangePercent', False),
+            "actives": parse(actives_resp, 'regularMarketVolume', True)
         }
     except Exception as e:
         return {"error": str(e)}

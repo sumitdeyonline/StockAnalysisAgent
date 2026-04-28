@@ -112,29 +112,48 @@ if "pending_comparison" in st.session_state and st.session_state.pending_compari
     active_query = st.session_state.pending_comparison["query"]
     st.session_state.pending_comparison = None
 
+def __stream_agent_response(user_message, status_placeholder):
+    """A generator that plucks raw text fragments from the LangGraph message stream natively."""
+    try:
+        for chunk, metadata in st.session_state.agent.stream(
+            {"messages": [user_message]}, 
+            stream_mode="messages"
+        ):
+            # Only intercept string chunks returned from the main Language Model
+            if metadata.get("langgraph_node") == "agent":
+                # Handle old-style string chunks natively
+                if isinstance(chunk.content, str) and chunk.content:
+                    status_placeholder.empty() # Clear the spinner when text generation explicitly starts
+                    yield chunk.content
+                # Handle new-style list chunk arrays generated distinctly by langchain-anthropic pipelines
+                elif isinstance(chunk.content, list):
+                    for block in chunk.content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            status_placeholder.empty()
+                            yield block.get("text", "")
+    except Exception as e:
+        yield f"\n\n*Agent stream interrupted: {e}*"
+
 @st.fragment
 def execute_agent_search(user_message, prompt_str, search_id):
-    # Run the agent
+    # Run the streaming agent loop
     with st.chat_message("assistant"):
-        with st.spinner("Thinking and interacting with tools..."):
+        status_placeholder = st.empty()
+        with status_placeholder.spinner("Thinking and interacting with tools..."):
             try:
-                # The agent graph requires a messages list input
-                result = st.session_state.agent.invoke(
-                    {"messages": [user_message]}
-                )
+                # Streamlit parses the generator securely and types the output visually in real-time.
+                # It evaluates exactly to the full string once completion is done.
+                final_ai_content = st.write_stream(__stream_agent_response(user_message, status_placeholder))
                 
-                # The final message from the agent is the last one in the list
-                final_ai_msg = result['messages'][-1]
-                st.markdown(final_ai_msg.content)
-                
-                # Consolidate the new running update into the existing item, OR create a new search history log
-                if search_id:
-                    update_search_response(st.session_state.email, search_id, final_ai_msg.content)
-                else:
-                    save_search_query(st.session_state.email, prompt_str, final_ai_msg.content)
-                
-                # Append to session state
-                st.session_state.messages.append(final_ai_msg)
+                if final_ai_content:
+                    # Persist the fully compiled AI stream string safely into PostgreSQL
+                    if search_id:
+                        update_search_response(st.session_state.email, search_id, final_ai_content)
+                    else:
+                        save_search_query(st.session_state.email, prompt_str, final_ai_content)
+                    
+                    # Store to UI state map
+                    st.session_state.messages.append(AIMessage(content=final_ai_content))
             except Exception as e:
                 st.error(f"An error occurred: {e}")
 
@@ -216,21 +235,29 @@ movers = load_market_movers()
 if "error" not in movers:
     tab1, tab2, tab3 = st.sidebar.tabs(["📈 Gainers", "📉 Losers", "🔥 Active"])
     
-    def render_mover_list(container, items):
+    def render_mover_list(container, items, show_volume=False):
         if not items:
             container.info("Data unavailable")
             return
         for item in items:
             sym = item['symbol']
             price = f"${item['price']:.2f}" if item['price'] else "N/A"
-            chg = item['change']
-            color = "green" if chg and chg > 0 else "red"
-            chg_str = f"{chg:.2f}%" if chg else "N/A"
-            container.markdown(f"**{sym}**: {price} (:{color}[{chg_str}])")
+            if show_volume:
+                vol = item.get('volume', 0)
+                if not vol: vol_str = "N/A"
+                elif vol >= 1e9: vol_str = f"{vol/1e9:.2f}B"
+                elif vol >= 1e6: vol_str = f"{vol/1e6:.2f}M"
+                else: vol_str = f"{vol/1e3:.1f}k"
+                container.markdown(f"**{sym}**: {price} *(Vol: {vol_str})*")
+            else:
+                chg = item['change']
+                color = "green" if chg and chg > 0 else "red"
+                chg_str = f"{chg:.2f}%" if chg else "N/A"
+                container.markdown(f"**{sym}**: {price} (:{color}[{chg_str}])")
             
     render_mover_list(tab1, movers.get("gainers", []))
     render_mover_list(tab2, movers.get("losers", []))
-    render_mover_list(tab3, movers.get("actives", []))
+    render_mover_list(tab3, movers.get("actives", []), show_volume=True)
 else:
     st.sidebar.warning("Failed to load generic market movers.")
 
