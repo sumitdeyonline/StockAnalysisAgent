@@ -102,11 +102,12 @@ def get_past_analyses(topic: str, limit: int = 5) -> str:
     except Exception as e:
         return f"Failed to retrieve from database: {e}"
 
-def save_search_query(email: str, query: str, response: str):
+def save_search_query(email: str, query: str, response: str) -> int:
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("INSERT INTO search_history (email, query, response) VALUES (%s, %s, %s)", (email, query, response))
+        cur.execute("INSERT INTO search_history (email, query, response) VALUES (%s, %s, %s) RETURNING id", (email, query, response))
+        new_id = cur.fetchone()[0]
         
         # Enforce maximum 15 search history limit per email
         cur.execute("""
@@ -122,8 +123,10 @@ def save_search_query(email: str, query: str, response: str):
         conn.commit()
         cur.close()
         conn.close()
+        return new_id
     except Exception as e:
         print(f"Failed to save search query: {e}")
+        return None
 
 def get_recent_searches(email: str, limit: int = 15):
     try:

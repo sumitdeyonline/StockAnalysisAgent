@@ -59,6 +59,9 @@ if "messages" not in st.session_state:
 if "agent" not in st.session_state:
     st.session_state.agent = setup_agent()
 
+if "current_search_id" not in st.session_state:
+    st.session_state.current_search_id = None
+
 def show_comparison_dialog():
     with st.container(border=True):
         st.markdown("### 🔍 Historical Analysis Review")
@@ -73,10 +76,30 @@ def show_comparison_dialog():
         del st.session_state["confirming_comparison"]
         st.rerun()
     if col2.button("Load to Chat", help="Load this past result into the main chat screen."):
-        st.session_state.messages = [
-            HumanMessage(content=data['query']),
-            AIMessage(content=data['response'])
-        ]
+        response_text = data['response'] or ""
+        
+        # Check if the DB response is a modern serialized multi-turn transcript
+        if "**HUMAN**:" in response_text or "**AI**:" in response_text:
+            parsed_messages = []
+            import re
+            # Split the string by the role tags, keeping the roles in the resulting array
+            chunks = re.split(r'\*\*(HUMAN|AI)\*\*:', response_text)
+            for i in range(1, len(chunks), 2):
+                role = chunks[i]
+                content = chunks[i+1].strip()
+                if role == "HUMAN":
+                    parsed_messages.append(HumanMessage(content=content))
+                elif role == "AI":
+                    parsed_messages.append(AIMessage(content=content))
+            st.session_state.messages = parsed_messages
+        else:
+            # Legacy fallback for old single-shot searches
+            st.session_state.messages = [
+                HumanMessage(content=data['query']),
+                AIMessage(content=response_text)
+            ]
+        
+        st.session_state.current_search_id = data['search_id']
         del st.session_state["confirming_comparison"]
         st.rerun()
     if col3.button("Cancel"):
@@ -129,8 +152,7 @@ for idx, msg in enumerate(st.session_state.messages):
                     )
 
 prompt_to_run = None
-active_search_id = None
-
+active_search_id = st.session_state.current_search_id
 active_query = None
 
 # Accept user input
@@ -141,6 +163,7 @@ if prompt := st.chat_input("Enter your request (e.g., 'Analyze NVDA stock and re
 if "pending_comparison" in st.session_state and st.session_state.pending_comparison:
     prompt_to_run = st.session_state.pending_comparison["prompt"]
     active_search_id = st.session_state.pending_comparison["search_id"]
+    st.session_state.current_search_id = active_search_id
     active_query = st.session_state.pending_comparison["query"]
     st.session_state.pending_comparison = None
 
@@ -148,7 +171,7 @@ def __stream_agent_response(user_message, status_placeholder):
     """A generator that plucks raw text fragments from the LangGraph message stream natively."""
     try:
         for chunk, metadata in st.session_state.agent.stream(
-            {"messages": [user_message]}, 
+            {"messages": st.session_state.messages}, 
             stream_mode="messages"
         ):
             # Only intercept string chunks returned from the main Language Model
@@ -178,14 +201,18 @@ def execute_agent_search(user_message, prompt_str, search_id):
                 final_ai_content = st.write_stream(__stream_agent_response(user_message, status_placeholder))
                 
                 if final_ai_content:
-                    # Persist the fully compiled AI stream string safely into PostgreSQL
-                    if search_id:
-                        update_search_response(st.session_state.email, search_id, final_ai_content)
-                    else:
-                        save_search_query(st.session_state.email, prompt_str, final_ai_content)
-                    
-                    # Store to UI state map
+                    # Store to UI state map natively before database save
                     st.session_state.messages.append(AIMessage(content=final_ai_content))
+                    
+                    # Serialize the entire conversation for DB persistence
+                    full_convo = "\n\n".join([f"**{m.type.upper()}**: {m.content}" for m in st.session_state.messages if isinstance(m, AIMessage) or isinstance(m, HumanMessage)])
+                    
+                    if active_search_id:
+                        update_search_response(st.session_state.email, active_search_id, full_convo)
+                    else:
+                        new_id = save_search_query(st.session_state.email, prompt_str, full_convo)
+                        if new_id:
+                            st.session_state.current_search_id = new_id
                     
                     # Force a full app rerun to elegantly sync the fragment state back into the main history loop
                     st.rerun()
@@ -195,7 +222,7 @@ def execute_agent_search(user_message, prompt_str, search_id):
 if prompt_to_run:
     actual_input_msg = HumanMessage(content=prompt_to_run)
     
-    if active_search_id:
+    if active_query:
         display_text = f"🔄 *Re-evaluating historical query against live systems:* **{active_query}**"
         st.session_state.messages.append(HumanMessage(content=display_text))
         with st.chat_message("user"):
