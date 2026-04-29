@@ -87,7 +87,7 @@ if "confirming_comparison" in st.session_state:
     show_comparison_dialog()
 
 # Display chat messages from history
-for msg in st.session_state.messages:
+for idx, msg in enumerate(st.session_state.messages):
     # Filter out langgraph's intermediate tool messages from the UI simple history
     if isinstance(msg, HumanMessage):
         with st.chat_message("user"):
@@ -95,6 +95,38 @@ for msg in st.session_state.messages:
     elif isinstance(msg, AIMessage):
         with st.chat_message("assistant"):
             st.markdown(msg.content)
+            # Defer PDF generation to prevent blocking the main render loop
+            col1, col2 = st.columns([1, 4])
+            
+            # Dynamically formulate the filename based on the preceding user query
+            dl_filename = "claude_analysis_report.pdf"
+            if idx > 0 and isinstance(st.session_state.messages[idx-1], HumanMessage):
+                raw_q = st.session_state.messages[idx-1].content
+                import re
+                # Strip non-alphanumeric chars, lowercase it, and grab first few words
+                clean_q = re.sub(r'[^\w\s]', '', raw_q).strip().lower()
+                short_q = "_".join(clean_q.split()[:5])[:30]
+                if short_q:
+                    dl_filename = f"{short_q}_analysis.pdf"
+            
+            with col1:
+                if st.button("📄 Prepare PDF", key=f"prep_hist_{idx}"):
+                    with st.spinner("Compiling..."):
+                        try:
+                            from tools.export_tools import generate_pdf
+                            st.session_state[f"pdf_bytes_{idx}_{hash(msg.content)}"] = generate_pdf(msg.content)
+                        except Exception as e:
+                            st.error(f"Failed: {e}")
+            
+            with col2:
+                if f"pdf_bytes_{idx}_{hash(msg.content)}" in st.session_state:
+                    st.download_button(
+                        label="⬇️ Download PDF",
+                        data=st.session_state[f"pdf_bytes_{idx}_{hash(msg.content)}"],
+                        file_name=dl_filename,
+                        mime="application/pdf",
+                        key=f"dl_hist_{idx}"
+                    )
 
 prompt_to_run = None
 active_search_id = None
@@ -154,6 +186,9 @@ def execute_agent_search(user_message, prompt_str, search_id):
                     
                     # Store to UI state map
                     st.session_state.messages.append(AIMessage(content=final_ai_content))
+                    
+                    # Force a full app rerun to elegantly sync the fragment state back into the main history loop
+                    st.rerun()
             except Exception as e:
                 st.error(f"An error occurred: {e}")
 
