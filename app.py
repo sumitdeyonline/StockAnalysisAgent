@@ -207,8 +207,8 @@ def execute_agent_search(user_message, prompt_str, search_id):
                     # Serialize the entire conversation for DB persistence
                     full_convo = "\n\n".join([f"**{m.type.upper()}**: {m.content}" for m in st.session_state.messages if isinstance(m, AIMessage) or isinstance(m, HumanMessage)])
                     
-                    if active_search_id:
-                        update_search_response(st.session_state.email, active_search_id, full_convo)
+                    if search_id:
+                        update_search_response(st.session_state.email, search_id, full_convo)
                     else:
                         new_id = save_search_query(st.session_state.email, prompt_str, full_convo)
                         if new_id:

@@ -1,75 +1,32 @@
 import os
-import datetime
-import psycopg2
-from psycopg2.extras import DictCursor
+import requests
 from langchain_core.tools import tool
 
-def get_db_connection():
-    db_url = os.environ.get("DATABASE_URL")
-    if not db_url:
-        raise Exception("DATABASE_URL environment variable is not set.")
-    return psycopg2.connect(db_url)
+def get_supabase_headers():
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    if not url or not key:
+        raise Exception("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY missing from .env")
+    return url, {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json"
+    }
 
-# Setup function to create the table if it's missing
 def init_db():
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS agent_knowledge (
-                id SERIAL PRIMARY KEY,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                topic VARCHAR(255),
-                content TEXT
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS search_history (
-                id SERIAL PRIMARY KEY,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                email VARCHAR(255),
-                query TEXT,
-                response TEXT
-            )
-        """)
-        # Make sure the email column exists if the table was created previously
-        # try:
-        #     cur.execute("ALTER TABLE search_history ADD COLUMN email VARCHAR(255);")
-        # except psycopg2.Error:
-        #     conn.rollback() # It already exists
-        # else:
-        #     conn.commit()
-
-        # # Add response column for caching AI results
-        # try:
-        #     cur.execute("ALTER TABLE search_history ADD COLUMN response TEXT;")
-        # except psycopg2.Error:
-        #     conn.rollback() # It already exists
-        # else:
-        #     conn.commit()
-            
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception as e:
-        print(f"PostgreSQL init error (ensure DB is running and URL is correct): {e}")
+    print("Database tables are now managed externally via Supabase Dashboard.")
 
 @tool
 def save_analysis_to_db(topic: str, content: str) -> str:
     """
-    Saves a summary or key finding of an analysis to the PostgreSQL database for future reference.
+    Saves a summary or key finding of an analysis to the Supabase database for future reference.
     Useful when saving long term knowledge or tracking conclusions.
     """
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO agent_knowledge (topic, content) VALUES (%s, %s)",
-            (topic, content)
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
+        url, headers = get_supabase_headers()
+        payload = {"topic": topic, "content": content}
+        res = requests.post(f"{url}/rest/v1/agent_knowledge", headers=headers, json=payload)
+        res.raise_for_status()
         return f"Successfully saved analysis on '{topic}' to the database."
     except Exception as e:
         return f"Failed to save to database: {e}"
@@ -77,20 +34,16 @@ def save_analysis_to_db(topic: str, content: str) -> str:
 @tool
 def get_past_analyses(topic: str, limit: int = 5) -> str:
     """
-    Retrieves past analyses or knowledge stored in the PostgreSQL database matching a specific topic.
+    Retrieves past analyses or knowledge stored in the Supabase database matching a specific topic.
     """
     try:
-        conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=DictCursor)
+        url, headers = get_supabase_headers()
         search_topic = f"%{topic}%"
-        cur.execute(
-            "SELECT timestamp, topic, content FROM agent_knowledge WHERE topic ILIKE %s ORDER BY timestamp DESC LIMIT %s",
-            (search_topic, limit)
-        )
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
+        query_url = f"{url}/rest/v1/agent_knowledge?topic=ilike.{search_topic}&select=timestamp,topic,content&order=timestamp.desc&limit={limit}"
+        res = requests.get(query_url, headers=headers)
+        res.raise_for_status()
         
+        rows = res.json()
         if not rows:
             return f"No past analyses found in the database for topic: {topic}"
             
@@ -102,27 +55,34 @@ def get_past_analyses(topic: str, limit: int = 5) -> str:
     except Exception as e:
         return f"Failed to retrieve from database: {e}"
 
-def save_search_query(email: str, query: str, response: str) -> int:
+def save_search_query(email: str, query: str, response_text: str) -> int:
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("INSERT INTO search_history (email, query, response) VALUES (%s, %s, %s) RETURNING id", (email, query, response))
-        new_id = cur.fetchone()[0]
+        url, headers = get_supabase_headers()
+        
+        # Prefer: return=representation ensures the API returns the inserted row (including its auto-generated ID)
+        post_headers = {**headers, "Prefer": "return=representation"}
+        payload = {"email": email, "query": query, "response": response_text}
+        
+        insert_res = requests.post(f"{url}/rest/v1/search_history", headers=post_headers, json=payload)
+        insert_res.raise_for_status()
+        
+        inserted_data = insert_res.json()
+        if not inserted_data:
+            raise Exception("No data returned from insert.")
+            
+        new_id = inserted_data[0]['id']
         
         # Enforce maximum 15 search history limit per email
-        cur.execute("""
-            DELETE FROM search_history 
-            WHERE id IN (
-                SELECT id FROM search_history 
-                WHERE email = %s 
-                ORDER BY timestamp DESC 
-                OFFSET 15
-            )
-        """, (email,))
-        
-        conn.commit()
-        cur.close()
-        conn.close()
+        history_url = f"{url}/rest/v1/search_history?email=eq.{email}&select=id&order=timestamp.desc"
+        history_res = requests.get(history_url, headers=headers)
+        history_res.raise_for_status()
+            
+        history_ids = [row['id'] for row in history_res.json()]
+        if len(history_ids) > 15:
+            ids_to_delete = history_ids[15:]
+            delete_url = f"{url}/rest/v1/search_history?id=in.({','.join(map(str, ids_to_delete))})"
+            requests.delete(delete_url, headers=headers)
+            
         return new_id
     except Exception as e:
         print(f"Failed to save search query: {e}")
@@ -130,46 +90,36 @@ def save_search_query(email: str, query: str, response: str) -> int:
 
 def get_recent_searches(email: str, limit: int = 15):
     try:
-        conn = get_db_connection()
-        cur = conn.cursor(cursor_factory=DictCursor)
-        cur.execute("SELECT id, query, response FROM search_history WHERE email = %s ORDER BY timestamp DESC LIMIT %s", (email, limit))
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
-        return [{"id": row['id'], "query": row['query'], "response": row.get('response')} for row in rows]
+        url, headers = get_supabase_headers()
+        query_url = f"{url}/rest/v1/search_history?email=eq.{email}&select=id,query,response&order=timestamp.desc&limit={limit}"
+        res = requests.get(query_url, headers=headers)
+        res.raise_for_status()
+        return res.json()
     except Exception as e:
         print(f"Failed to retrieve recent searches: {e}")
         return []
 
 def delete_search_history(email: str):
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("DELETE FROM search_history WHERE email = %s", (email,))
-        conn.commit()
-        cur.close()
-        conn.close()
+        url, headers = get_supabase_headers()
+        delete_url = f"{url}/rest/v1/search_history?email=eq.{email}"
+        requests.delete(delete_url, headers=headers)
     except Exception as e:
         print(f"Failed to delete search history: {e}")
 
 def delete_single_search(email: str, search_id: int):
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("DELETE FROM search_history WHERE email = %s AND id = %s", (email, search_id))
-        conn.commit()
-        cur.close()
-        conn.close()
+        url, headers = get_supabase_headers()
+        delete_url = f"{url}/rest/v1/search_history?email=eq.{email}&id=eq.{search_id}"
+        requests.delete(delete_url, headers=headers)
     except Exception as e:
         print(f"Failed to delete single search: {e}")
 
 def update_search_response(email: str, search_id: int, new_response: str):
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("UPDATE search_history SET response = %s WHERE id = %s AND email = %s", (new_response, search_id, email))
-        conn.commit()
-        cur.close()
-        conn.close()
+        url, headers = get_supabase_headers()
+        update_url = f"{url}/rest/v1/search_history?email=eq.{email}&id=eq.{search_id}"
+        payload = {"response": new_response}
+        requests.patch(update_url, headers=headers, json=payload)
     except Exception as e:
         print(f"Failed to update search response: {e}")
