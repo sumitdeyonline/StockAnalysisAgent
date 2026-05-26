@@ -6,7 +6,7 @@ class PDF(FPDF):
         # Set font
         self.set_font("helvetica", "B", 15)
         # Title
-        self.cell(0, 10, "Claude Stock Analysis Agent - Report", border=0, align="C", new_x="LMARGIN", new_y="NEXT")
+        self.cell(0, 10, "Stock Analysis Agent - Report", border=0, align="C", new_x="LMARGIN", new_y="NEXT")
         # Line break
         self.ln(10)
 

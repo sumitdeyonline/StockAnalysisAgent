@@ -5,10 +5,9 @@ from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     BitsAndBytesConfig,
-    TrainingArguments,
 )
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from trl import SFTTrainer
+from peft import LoraConfig, prepare_model_for_kbit_training
+from trl import SFTTrainer, SFTConfig
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -29,7 +28,7 @@ def train():
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_compute_dtype=torch.float32,
         bnb_4bit_use_double_quant=True,
     )
 
@@ -52,7 +51,6 @@ def train():
         task_type="CAUSAL_LM",
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
     )
-    model = get_peft_model(model, peft_config)
 
     # 5. Load our Custom Financial Dataset
     print(f"Loading custom database interactions from {DATASET_PATH}...")
@@ -66,8 +64,11 @@ def train():
     dataset = dataset.map(format_chatml)
 
     # 6. Setup Training Loop
-    training_args = TrainingArguments(
+    training_args = SFTConfig(
         output_dir=OUTPUT_DIR,
+        dataset_text_field="text",
+        max_length=2048,
+        packing=False,
         num_train_epochs=3,
         per_device_train_batch_size=2,
         gradient_accumulation_steps=4,
@@ -76,11 +77,11 @@ def train():
         logging_steps=10,
         learning_rate=2e-4,
         weight_decay=0.001,
-        fp16=True,
+        fp16=False,
         bf16=False,
         max_grad_norm=0.3,
         max_steps=-1,
-        warmup_ratio=0.03,
+        warmup_steps=10,
         group_by_length=True,
         lr_scheduler_type="cosine",
     )
@@ -89,11 +90,8 @@ def train():
         model=model,
         train_dataset=dataset,
         peft_config=peft_config,
-        dataset_text_field="text",
-        max_seq_length=2048,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         args=training_args,
-        packing=False,
     )
 
     # 7. Start Fine-Tuning!

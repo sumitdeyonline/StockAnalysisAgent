@@ -1,7 +1,6 @@
 import os
 import json
-import psycopg2
-from psycopg2.extras import DictCursor
+import requests
 from dotenv import load_dotenv
 
 # Load environment variables to securely connect to the DB
@@ -9,29 +8,41 @@ load_dotenv()
 
 SYSTEM_PROMPT = "You are a highly specialized financial AI assistant. You analyze stock market data, interpret technical indicators, and provide detailed, professional investment summaries without hallucinating."
 
-def get_db_connection():
-    db_url = os.environ.get("DATABASE_URL")
-    if not db_url:
-        raise Exception("DATABASE_URL missing. Check your .env file.")
-    return psycopg2.connect(db_url)
+def get_supabase_headers():
+    url = os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    if not url or not key:
+        raise Exception("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY missing from .env")
+    return url, {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json"
+    }
 
 def export_dataset(output_file="training_data.jsonl"):
     """
-    Connects to the PostgreSQL database, extracts historical user queries, 
+    Connects to the Supabase REST API, extracts historical user queries, 
     agent responses, and specialized knowledge, and formats them into a ChatML JSONL dataset.
     """
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=DictCursor)
+    url, headers = get_supabase_headers()
     dataset = []
 
     try:
         # 1. Extract Interaction History (Instruction Tuning)
         print("Extracting Search History...")
-        cur.execute("SELECT query, response FROM search_history WHERE query IS NOT NULL AND response IS NOT NULL")
-        interactions = cur.fetchall()
+        interactions_res = requests.get(f"{url}/rest/v1/search_history?select=query,response", headers=headers)
+        interactions_res.raise_for_status()
+        interactions = interactions_res.json()
+        
         for row in interactions:
-            query = row['query'].strip()
-            response = row['response'].strip()
+            query = row.get('query', '')
+            response = row.get('response', '')
+            
+            if not query or not response:
+                continue
+                
+            query = query.strip()
+            response = response.strip()
             
             # Discard broken or errored responses
             if len(response) < 20 or "Agent stream interrupted" in response or "Failed" in response:
@@ -48,11 +59,19 @@ def export_dataset(output_file="training_data.jsonl"):
 
         # 2. Extract Agent Knowledge (Domain Adaptation)
         print("Extracting Agent Knowledge Base...")
-        cur.execute("SELECT topic, content FROM agent_knowledge WHERE topic IS NOT NULL AND content IS NOT NULL")
-        knowledge_rows = cur.fetchall()
+        knowledge_res = requests.get(f"{url}/rest/v1/agent_knowledge?select=topic,content", headers=headers)
+        knowledge_res.raise_for_status()
+        knowledge_rows = knowledge_res.json()
+        
         for row in knowledge_rows:
-            topic = row['topic'].strip()
-            content = row['content'].strip()
+            topic = row.get('topic', '')
+            content = row.get('content', '')
+            
+            if not topic or not content:
+                continue
+                
+            topic = topic.strip()
+            content = content.strip()
             
             example = {
                 "messages": [
@@ -72,9 +91,6 @@ def export_dataset(output_file="training_data.jsonl"):
 
     except Exception as e:
         print(f"Extraction failed: {e}")
-    finally:
-        cur.close()
-        conn.close()
 
 if __name__ == "__main__":
     export_dataset()

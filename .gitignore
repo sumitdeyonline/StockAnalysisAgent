@@ -9,6 +9,7 @@ __pycache__/
 .env.example
 chroma_db/
 .venv/
+*.zip
 # Distribution / packaging
 .Python
 build/

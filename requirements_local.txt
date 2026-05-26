@@ -1,0 +1,16 @@
+langgraph
+langchain-huggingface
+streamlit
+yfinance
+chromadb
+tavily-python
+python-dotenv
+numpy<2.0
+transformers<5.0
+huggingface-hub<1.0
+peft
+torch
+accelerate
+fpdf2
+markdown
+psycopg2-binary
