@@ -4,6 +4,9 @@ from dotenv import load_dotenv
 from agent import setup_agent, is_financial_query
 from langchain_core.messages import HumanMessage, AIMessage
 from tools.db_tools import init_db, save_search_query, get_recent_searches, delete_search_history, delete_single_search, update_search_response
+from authlib.integrations.requests_client import OAuth2Session
+import secrets
+import requests
 
 # Load environment variables from .env
 load_dotenv()
@@ -39,18 +42,85 @@ st.markdown("This agent has access to real-time market data , recent news, and s
 if "email" not in st.session_state:
     st.session_state.email = None
 
+# Load Auth0 credentials safely
+try:
+    AUTH0_DOMAIN = st.secrets.get("AUTH0_DOMAIN", os.getenv("AUTH0_DOMAIN"))
+    CLIENT_ID = st.secrets.get("AUTH0_CLIENT_ID", os.getenv("AUTH0_CLIENT_ID"))
+    CLIENT_SECRET = st.secrets.get("AUTH0_CLIENT_SECRET", os.getenv("AUTH0_CLIENT_SECRET"))
+    REDIRECT_URI = st.secrets.get("AUTH0_REDIRECT_URI", os.getenv("AUTH0_REDIRECT_URI", "http://localhost:8501/"))
+except Exception:
+    AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN")
+    CLIENT_ID = os.getenv("AUTH0_CLIENT_ID")
+    CLIENT_SECRET = os.getenv("AUTH0_CLIENT_SECRET")
+    REDIRECT_URI = os.getenv("AUTH0_REDIRECT_URI", "http://localhost:8501/")
+
+if not AUTH0_DOMAIN or not CLIENT_ID:
+    st.error("⚠️ **Auth0 Configuration Missing**\nPlease configure `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, and `AUTH0_CLIENT_SECRET` in `.streamlit/secrets.toml` or as environment variables.")
+    st.stop()
+
+# Fetch Auth0 endpoints manually
+@st.cache_data
+def get_auth0_endpoints(domain):
+    try:
+        resp = requests.get(f'https://{domain}/.well-known/openid-configuration')
+        data = resp.json()
+        return data['authorization_endpoint'], data['token_endpoint'], data['userinfo_endpoint']
+    except Exception:
+        return None, None, None
+
+auth_url, token_url, userinfo_url = get_auth0_endpoints(AUTH0_DOMAIN)
+if not auth_url:
+    st.error("Failed to fetch Auth0 configuration. Please check your AUTH0_DOMAIN.")
+    st.stop()
+
+# Check if user is returning from Auth0 with an authorization code
+query_params = st.query_params
+if "code" in query_params and not st.session_state.email:
+    code = query_params["code"]
+    client = OAuth2Session(CLIENT_ID, CLIENT_SECRET, redirect_uri=REDIRECT_URI)
+    
+    try:
+        from urllib.parse import urlencode
+        callback_url = f"{REDIRECT_URI}?{urlencode(dict(st.query_params))}"
+        token = client.fetch_token(token_url, authorization_response=callback_url)
+        
+        # Fetch user info using the access token
+        resp = client.get(userinfo_url)
+        user_info = resp.json()
+        
+        # Map Auth0 email to the app's internal email state
+        st.session_state.email = user_info.get("email")
+        st.query_params.clear() # Clean up the URL
+        st.rerun()
+    except Exception as e:
+        st.error(f"Authentication failed: {e}")
+        st.stop()
+
+# Force Login if no email is set in session
 if not st.session_state.email:
-    st.markdown("### Please sign in")
-    email_input = st.text_input("Enter your email ID to load your history:")
-    if st.button("Continue"):
-        if email_input:
-            st.session_state.email = email_input
-            st.rerun()
-        else:
-            st.warning("Please enter a valid email.")
+    st.markdown("### 🔒 Secure Login Required")
+    st.write("Please authenticate via Auth0 to access the Stock Analysis Agent.")
+    
+    if st.button("Login with Auth0"):
+        nonce = secrets.token_urlsafe(16)
+        st.session_state['nonce'] = nonce
+        
+        client = OAuth2Session(CLIENT_ID, CLIENT_SECRET, redirect_uri=REDIRECT_URI, scope="openid profile email")
+        
+        uri, state = client.create_authorization_url(auth_url, nonce=nonce)
+        st.markdown(f'<meta http-equiv="refresh" content="0; url={uri}">', unsafe_allow_html=True)
+        
     st.stop()
     
-st.markdown(f"**Logged in as:** `{st.session_state.email}`")
+col_user, col_logout = st.columns([8, 1])
+with col_user:
+    st.markdown(f"**Logged in securely as:** `{st.session_state.email}`")
+with col_logout:
+    if st.button("Logout"):
+        st.session_state.clear()
+        logout_url = f"https://{AUTH0_DOMAIN}/v2/logout?client_id={CLIENT_ID}&returnTo={REDIRECT_URI}"
+        st.markdown(f'<meta http-equiv="refresh" content="0; url={logout_url}">', unsafe_allow_html=True)
+        st.stop()
 
 # Initialize session state for messages and the agent
 if "messages" not in st.session_state:
